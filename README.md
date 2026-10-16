@@ -1,5 +1,11 @@
 # tern-pr-tour
 
+![A tour step beside the code it explains](docs/step.png)
+
+| Answering a question asked from the tour | Contents |
+| --- | --- |
+| ![An answer step inserted after the question](docs/answer.png) | ![Chapters and steps](docs/contents.png) |
+
 Guided, step-by-step PR tours inside Tern, after
 [diff-tour](https://github.com/init-co-jp/diff-tour): what the change is for,
 where to spend time, what a senior would ask and how they would judge it.
