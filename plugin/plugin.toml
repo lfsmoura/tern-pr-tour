@@ -1,0 +1,12 @@
+schema = 1
+id = "diff-tour"
+name = "Diff Tour"
+version = "0.1.0"
+description = "Step through a PR as a guided tour an agent wrote: what it is for, where to look, what a senior would ask."
+icon = "map"
+host = "host.luau"
+window = "window.luau"
+
+[[blocks]]
+id = "tour"
+title = "Diff Tour"
