@@ -233,7 +233,7 @@ local function open_location(state: State, file: string, at: string?, line: numb
 		return false
 	end
 	local function go(path: string, l: number?)
-		local url = LINK .. "show?path=" .. url_encode(path) .. (if l then "&line=" .. l else "")
+		local url = LINK .. "show?pane=" .. state.cx.pane .. "&path=" .. url_encode(path) .. (if l then "&line=" .. l else "")
 		if focus then
 			url ..= "&focus=1"
 		end

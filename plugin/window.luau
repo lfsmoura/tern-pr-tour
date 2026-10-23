@@ -199,6 +199,20 @@ local function ask(cx: WindowCx, path: string, at: number)
 		end)
 end
 
+-- A preview opens beside the focused pane, so a follow open while the tour's tab is
+-- hidden (an agent edit, an answer landing, a git read finishing) would land in the
+-- tab on screen. It waits here, by tour pane, until focus enters the tour's tab.
+local deferred: { [number]: { path: string, line: number? } } = {}
+
+tern.on("focus", function(ev: FocusEvent, cx: WindowCx)
+	for tour, want in deferred do
+		if cx.session:tab_of(tour) == ev.tab then
+			deferred[tour] = nil
+			cx.docs:open(want.path, { how = "preview", line = want.line })
+		end
+	end
+end)
+
 tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
 	if string.sub(link.url, 1, #LINK) ~= LINK then
 		return nil
@@ -206,9 +220,19 @@ tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
 	local verb = string.match(string.sub(link.url, #LINK + 1), "^([%w_]+)")
 	local q = query(link.url)
 	if verb == "show" and q.path then
-		local pane = cx.docs:open(q.path, { how = "preview", line = tonumber(q.line) })
-		if q.focus == "1" then
-			cx.layout:focus(pane)
+		local tour = tonumber(q.pane)
+		local focused = cx.session:focused()
+		local line = tonumber(q.line)
+		if tour and not (focused and cx.session:tab_of(tour) == cx.session:tab_of(focused)) then
+			deferred[tour] = { path = q.path, line = line }
+		else
+			if tour then
+				deferred[tour] = nil
+			end
+			local pane = cx.docs:open(q.path, { how = "preview", line = line })
+			if q.focus == "1" then
+				cx.layout:focus(pane)
+			end
 		end
 	elseif verb == "ask" and q.path then
 		ask(cx, q.path, tonumber(q.at) or 1)

@@ -62,7 +62,10 @@ does not exist shows as a warning in the step. Each tour's step is stored in
 Opening code goes through `tern-difftour://show`, which the window half
 (`plugin/window.luau`) turns into a preview block at the line. When the checkout
 is at the tour's head the real file opens; otherwise (base-side code, a PR not
-checked out) a snapshot from `git show` under the plugin's data dir does.
+checked out) a snapshot from `git show` under the plugin's data dir does. An open
+while the tour's tab is not on screen (a follow after an agent edit or an answer
+landing) waits until you return to that tab, instead of landing in the tab you
+are looking at.
 
 `?` goes through `tern-difftour://ask`: the window half offers the step's
 suggested questions (or a prompt for your own) and types one line,
