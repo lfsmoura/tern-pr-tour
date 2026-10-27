@@ -206,12 +206,22 @@ tour.chapters.forEach((ch: Json, ci: number) => {
 	ch.steps.forEach((step: Json, si: number) => flat.push({ w: `chapters[${ci}].steps[${si}]`, step }));
 });
 
+const OPTIONS = 4;
+const questions = new Set<string>();
+
 flat.forEach(({ w, step }, i) => {
 	if (!isStr(step?.title)) fail(w, "title missing");
 	if (!Array.isArray(step?.blocks) || step.blocks.length === 0) return fail(w, "blocks empty");
 	step.blocks.forEach((b: Json, bi: number) => checkBlock(`${w}.blocks[${bi}]`, b));
 	if (step.question !== undefined && step.question !== true) fail(w, "question must be true or absent");
-	if (step.question && i === flat.length - 1) fail(w, "a question step needs its answer in the next step");
+	if (step.question && (i === flat.length - 1 || flat[i + 1].step?.question)) fail(w, "a question step needs its answer in the next step");
+	if (step.fills !== undefined && !(isStr(step.fills) && questions.has(step.fills)))
+		fail(w, "fills must be the title of an earlier question step");
+	if (step.question) {
+		if (questions.has(step.title)) fail(w, "question titles must be unique (answers and fills are keyed by them)");
+		questions.add(step.title);
+		checkChoices(w, step.choices);
+	} else if (step.choices !== undefined) fail(w, "choices only go on a question step");
 	if (step.asked !== undefined && !isStr(step.asked)) fail(w, "asked must be the reader's question");
 	if (step.asks !== undefined) {
 		if (!Array.isArray(step.asks) || step.asks.length > 3 || !step.asks.every(isStr)) fail(w, "asks must be up to 3 strings");
@@ -219,6 +229,23 @@ flat.forEach(({ w, step }, i) => {
 			fail(w, "no asks on a question step or the step before it");
 	}
 });
+
+function checkChoices(w: string, c: Json) {
+	if (typeof c !== "object" || c === null) return fail(w, `a question step needs choices: { options: ${OPTIONS} × { text, model? }, answer }`);
+	const options = c.options;
+	if (!Array.isArray(options) || options.length !== OPTIONS) return fail(`${w}.choices`, `options must be ${OPTIONS} options`);
+	if (!Number.isInteger(c.answer) || c.answer < 0 || c.answer >= OPTIONS) return fail(`${w}.choices`, `answer must be the right option's 0-based index (0–${OPTIONS - 1})`);
+	const seen = new Set<string>();
+	options.forEach((o: Json, oi: number) => {
+		const at = `${w}.choices.options[${oi}]`;
+		if (!isStr(o?.text)) return fail(at, "text missing");
+		if (seen.has(o.text.trim())) fail(at, "options must differ");
+		seen.add(o.text.trim());
+		if (oi === c.answer) {
+			if (o.model !== undefined) fail(at, "the right option has no model");
+		} else if (!isStr(o.model)) fail(at, "a wrong option needs model: the wrong understanding that picks it");
+	});
+}
 
 if (!flat[0]?.step?.blocks?.some((b: Json) => b?.target === true)) fail("chapters[0].steps[0]", "should start with { \"target\": true }");
 

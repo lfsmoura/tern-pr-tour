@@ -2,7 +2,7 @@
 
 The Tern `diff-tour` plugin (`plugin/` in tern-pr-tour) shows this file. It is the
 [diff-tour](https://github.com/init-co-jp/diff-tour) v1 tour format plus `repo`,
-`pr`, `agent` and `asked`, without diff-tour's `schema` block.
+`pr`, `agent`, `choices`, `fills` and `asked`, without diff-tour's `schema` block.
 
 ```ts
 Tour = {
@@ -19,11 +19,28 @@ Tour = {
 Step = {
   title: string,
   question?: true,          // shows only the question; the answer is the NEXT step
+  choices?: Choices,        // required on question steps: the reader must pick before going on
+  fills?: string,           // on steps that fill a missed question's gap: that question's title
   asks?: string[],          // 0–3 questions a junior would want to ask here (`?` offers them)
   asked?: string,           // set on steps that answer a reader's `?` question: the question
   blocks: Block[],
 }
+
+Choices = {
+  options: { text: string, model?: string }[],  // exactly 4; `model` on each wrong one
+  answer: number,           // the right option's 0-based index
+}
 ```
+
+A question step shows its options (shuffled per question) and blocks →, `]`, `G` and contents
+jumps past it until the reader picks one (keys `1`–`4`) or `0` "I don't know"; the pick is final.
+A right pick goes on to the answer step. A wrong pick or "I don't know" also sends
+`[diff-tour gap]` to the agent and puts a **Regenerating** placeholder after the answer step,
+until steps with `"fills": "<question title>"` exist in the file.
+
+`text` is a bare claim, shown as is (inline markdown). `model` is never shown: it names the wrong
+understanding of this change that picks the option, so a miss says what to repair. Question
+titles are unique: picks and `fills` are keyed by them.
 
 The viewer reads code, diffs, file stats and commits from git at `base`/`head`.
 The JSON only points (file, lines, hunks); it never carries the repository's code.
@@ -70,5 +87,8 @@ Inline `` `code` `` and `**bold**` work in strings.
 - `asks`: short questions a junior would ask on this step. Drop any that the step or the next two
   steps already answer, that this repo's code cannot answer, or that fit any change ("where next?").
   Never on a `question` step or the step before it (they would leak the answer).
+- Every `question` step has `choices`, and the step after it is its answer, never another question.
+- `fills` steps go right after the missed question's answer step, in its chapter. A re-check
+  question among them also carries `fills` (and has a title of its own), as does its answer.
 - The first chapter's first step holds `{ "target": true }`; the map chapter uses `files` (roles)
   and a `flow`.

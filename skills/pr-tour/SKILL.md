@@ -1,6 +1,6 @@
 ---
 name: pr-tour
-description: Writes a step-by-step guided tour of a PR (or branch) the way a senior engineer reads it and opens it in Tern's Diff Tour block beside the agent; also answers `[diff-tour ask]` questions sent from an open tour. Use when the user asks to tour, walk through or explain a PR/diff step by step in Tern.
+description: Writes a step-by-step guided tour of a PR (or branch) the way a senior engineer reads it and opens it in Tern's Diff Tour block in a new tab, with four-option questions the reader must answer; also answers `[diff-tour ask]` questions and fills `[diff-tour gap]` misses sent from an open tour. Use when the user asks to tour, walk through or explain a PR/diff step by step in Tern.
 ---
 
 # PR tour
@@ -89,9 +89,8 @@ Writing rules:
 - Every assertive paragraph gets a `basis`; split paragraphs that mix bases. No `basis` on
   questions. Outside-library behavior is never `fact`.
 - "Fine / no need to worry" needs the place in this repo that shows it; otherwise ask it.
-- About one `question: true` step per chapter, its answer in the next step ("Answer: …" title is
-  fine). Pick questions a junior answers confidently and wrongly. Never leak an answer earlier
-  (titles, diagrams, chapter names). No "Question:" prefix; the viewer adds the badge.
+- About one `question: true` step per chapter, with four `choices`, its answer in the next step
+  ("Answer: …" title is fine). See **Questions** below.
 - End each chapter with a one-sentence `p` on what that part guarantees; it is an assertion, so
   it gets a `basis` too.
 - Name a principle only after showing it in this code; a few names per tour. Never paste lens text.
@@ -103,16 +102,50 @@ Writing rules:
   races, partial failure). Expect 2–4 per tour. `flow` for processing order; line remarks are `marks`.
 - Write in the language the user writes in.
 
+### Questions
+
+A question is how the tour finds out whether the reader understands this change well enough to
+approve it. The viewer will not go past it until they pick an option (or "I don't know"), and a
+wrong pick makes you rewrite the tour around their answer (§7). Its job is a diagnosis, not a score.
+
+What to ask:
+
+- One load-bearing idea of this change, one the reader must hold to approve it: what a concrete
+  value becomes, in which order things happen, what breaks under a given input or failure, which
+  promise is kept and where. Make them use it (trace a value, predict what the code does in a case
+  the tour has not shown), never recite the sentence above.
+- Answerable by reasoning from what the tour showed so far and the code on screen. Never trivia,
+  never knowledge from outside this repo. It may come before the step that explains it (a
+  prediction), but the reader must have a route to it.
+- A question a junior answers confidently and wrongly. Never leak the answer earlier (titles,
+  diagrams, chapter names). No "Question:" prefix; the viewer adds the badge.
+
+The four options:
+
+- Write the right claim first, then turn it into three wrong ones. Each one is what a reader with
+  a specific wrong understanding of this change would answer: reads base behavior as still
+  current, takes the call to be synchronous, thinks the cache is per request, misses the caller
+  that still passes the old value. Put that understanding in the option's `model`; it is what the
+  fill steps repair.
+- Every option is a bare claim with the same skeleton, length and register: no reasons, hedges or
+  bold, no "all/none of the above", nothing a reader can rule out on sight. A wrong option is only
+  diagnostic when the wrong understanding is what picks it. If someone who never read the code can
+  tell the right one, rewrite all four rather than patch one.
+- Vary `answer` across questions; the viewer shuffles the order anyway.
+- The answer step opens with the right claim, shows why with real code or a diagram, and says in a
+  sentence why the most tempting wrong option fails.
+
 ## 5. Check, then open
 
 ```sh
 bun <this skill's dir>/scripts/check-tour.ts FILE   # fix exactly what it reports; repeat until "ok"
-tern open --split right FILE                              # opens the Diff Tour block beside you
+tern open --tab FILE                                      # opens the Diff Tour block in a new tab
 ```
 
 The block live-reloads the file (about 1 s) and keeps the reader's step: edit the file, never
 reopen to refresh. Tell the user the keys: ←/→ step, `[`/`]` chapter, `t` contents, `o` open the
-step's code, `f` follow (the editor beside tracks each step), `?` ask, `q` close.
+step's code, `f` follow (the editor beside tracks each step), `?` ask, `q` close; on a question,
+`1`–`4` pick an option and `0` is "I don't know".
 
 ## 6. Answer `[diff-tour ask]` messages
 
@@ -130,3 +163,32 @@ across all chapters from 1.
    what would settle anything the repo cannot. Optionally close with one question to think about.
 3. Edit the file in place (keep everything else), run the checker, and reply in one line. The
    viewer jumps to the answer by itself.
+
+## 7. Fill `[diff-tour gap]` messages
+
+A wrong pick or "I don't know" on a question types into this pane:
+`[diff-tour gap] On question step <N> ("<title>") of tour <FILE> the reader picked "<option>"
+(wrong model: <model>); the answer is "<option>". …` The viewer shows a **Regenerating**
+placeholder after step N+1 until steps with `"fills": "<title>"` are in the file, and the reader
+may be waiting on it: work from the tour and the code it touches, not a fresh review.
+
+1. Diagnose. A wrong pick is a misconception and `model` names it; check it against the code the
+   question touched: what in this repo makes it believable (a name, base behavior, a comment, a
+   similar caller)? "I don't know" is a gap, not a misconception: find the earlier idea the
+   question depended on (a step of the tour, a piece of base code) and start from there.
+2. Insert steps right after step N+1, in the same chapter, each with `"fills": "<title>"`:
+   - First, resolve the pick: what they picked, why it is a reasonable thing to believe, the exact
+     place in this code where it stops being true (`diff` or `code` with `marks`), and what is
+     true instead. Title it with the corrected claim.
+   - Build from something the reader already holds (an earlier step, code they saw); one step, one
+     idea; draw it (`timeline`/`mermaid`) when order or who-calls-whom is the confusion. Target the
+     wrong understanding; don't repeat the answer step. One or two steps.
+   - Then re-check: a new `question` step with `choices` (a title of its own, `fills` set) that
+     applies the same idea to a different case in this change (another value, caller or failure),
+     so remembering the answer step's words does not pass it, then its answer step (`fills` set).
+     Same option craft; one wrong option is the original misconception in new clothes.
+   - When the missed question was itself a re-check (it has `fills`), no new question: repair, then
+     end with one sentence on what to look at in review (the line or test that would have shown it).
+3. Keep every other step as it is; never grade the reader in prose ("you got it wrong"); `basis`
+   rules hold. Run the checker and reply in one line. The viewer replaces the placeholder and, if
+   the reader is waiting on it, shows the first new step.

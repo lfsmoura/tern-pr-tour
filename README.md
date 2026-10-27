@@ -8,7 +8,10 @@
 
 Guided, step-by-step PR tours inside Tern, after
 [diff-tour](https://github.com/init-co-jp/diff-tour): what the change is for,
-where to spend time, what a senior would ask and how they would judge it.
+where to spend time, what a senior would ask and how they would judge it. Each
+chapter asks a four-option question you must answer to go on; a wrong answer
+makes the agent rewrite the tour around it, after
+[LearnHarness](https://github.com/amosblomqvist/learnharness).
 
 - `plugin/` — the `diff-tour` Tern plugin: a block that shows a tour one step at
   a time and opens each step's code in the editor beside it.
@@ -35,7 +38,8 @@ The checker needs [Bun](https://bun.sh); tours of PRs need `gh`.
 
 Ask your agent (running in Tern) for a tour of a PR; the `pr-tour` skill writes
 `~/.cache/diff-tour/<repo>/pr-<N>-<sha>.tour.json`, checks it and runs
-`tern open --split right FILE`. Any `*.tour.json` opens as a tour block.
+`tern open --tab FILE`: the tour opens in a new tab, its code beside it there.
+Any `*.tour.json` opens as a tour block.
 **Diff Tour: open a recent tour** in the palette reopens one.
 
 | Key | Does |
@@ -47,6 +51,7 @@ Ask your agent (running in Tern) for a tour of a PR; the `pr-tour` skill writes
 | `o` `⏎` | open the step's code in the editor beside, focused |
 | `f` | follow: the editor beside tracks every step (on by default) |
 | `?` | ask the agent about this step |
+| `1`–`4` / `0` | answer a question / "I don't know" |
 | `r` | reload the file and git |
 | `q` | close |
 
@@ -72,6 +77,15 @@ suggested questions (or a prompt for your own) and types one line,
 `[diff-tour ask] …`, into the agent pane named by the tour's `agent` (its
 `$TERN_PANE`), or an agent block in the tour's repo. The agent inserts answer
 steps after that step; the block sees the file grow and jumps to the answer.
+
+A question step lists four options, each wrong one written for a specific
+misunderstanding of the change, and holds the tour there until you pick one
+(picks are stored per tour in `kv.json` and are final). A wrong pick or "I
+don't know" goes through `tern-difftour://answer`, which types
+`[diff-tour gap] …` into the same agent; until it writes steps with
+`"fills": "<question title>"` after the answer step, the tour shows a
+**Regenerating** step there. Those steps repair that misunderstanding and end
+with a re-check question.
 
 The format is in `skills/pr-tour/references/format.md`; diff-tour's `schema`
 block (migrations run in SQLite) is not supported.

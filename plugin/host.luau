@@ -15,11 +15,17 @@ local LINK = "tern-difftour://"
 type Step = {
 	title: string,
 	question: boolean?,
+	-- Four options the reader must pick from (or "I don't know") before going on.
+	choices: any?,
+	-- On steps written after a missed question: that question's title.
+	fills: string?,
 	asked: string?,
 	asks: { string }?,
 	blocks: { any },
 }
-type Flat = { chapter: string, ci: number, si: number, step: Step }
+-- `n`: the step's 1-based index in the file; nil on a `regen` placeholder, which stands
+-- where the steps filling the gap of the missed question named by `regen` will land.
+type Flat = { chapter: string, ci: number, si: number, n: number?, regen: string?, step: Step }
 type Git = { pending: boolean, ok: boolean, text: string }
 type State = {
 	cx: BlockCx,
@@ -27,7 +33,11 @@ type State = {
 	raw: string?,
 	tour: any,
 	steps: { Flat },
+	-- Steps in the file (`steps` also holds regen placeholders).
+	count: number,
 	at: number,
+	-- Picks by question title: the option's 0-based index in the file, -1 for "I don't know".
+	answers: { [string]: number },
 	problem: string?,
 	repo: string?,
 	-- Whether the repo's HEAD is the tour's head (nil until git answers).
@@ -294,10 +304,91 @@ local function flatten(tour: any): { Flat }
 	local out: { Flat } = {}
 	for ci, ch in tour.chapters or {} do
 		for si, step in ch.steps or {} do
-			table.insert(out, { chapter = ch.title or "", ci = ci, si = si, step = step })
+			table.insert(out, { chapter = ch.title or "", ci = ci, si = si, n = #out + 1, step = step })
 		end
 	end
 	return out
+end
+
+-- A question's choices, when it has well-formed ones.
+local function choices_of(step: Step): any?
+	local c = if step.question then step.choices else nil
+	if type(c) == "table" and type(c.options) == "table" and #c.options >= 2 and type(c.answer) == "number" then
+		return c
+	end
+	return nil
+end
+
+local function option_text(c: any, i: number): string
+	local o = c.options[i + 1]
+	return if type(o) == "table" then tostring(o.text or "") else tostring(o or "")
+end
+
+-- The order options show in (0-based file indexes), shuffled per question so the right
+-- one is not always where the author wrote it, and the same on every render.
+local function display_order(title: string, n: number): { number }
+	local order: { number } = {}
+	for i = 0, n - 1 do
+		table.insert(order, i)
+	end
+	local h = 1
+	for i = 1, #title do
+		h = (h * 31 + string.byte(title, i)) % 2147483647
+	end
+	for i = n, 2, -1 do
+		h = (h * 48271) % 2147483647
+		local j = h % i + 1
+		order[i], order[j] = order[j], order[i]
+	end
+	return order
+end
+
+-- The reader's pick on a question with choices, nil while unanswered.
+local function pick_of(state: State, step: Step): number?
+	return if choices_of(step) then state.answers[tostring(step.title)] else nil
+end
+
+local function missed(state: State, step: Step): boolean
+	local pick = pick_of(state, step)
+	return pick ~= nil and pick ~= (choices_of(step) :: any).answer
+end
+
+-- The file's steps plus a placeholder after the answer step of each missed question
+-- whose filling steps (`fills` = its title) have not been written yet.
+local function build(state: State)
+	local file = flatten(state.tour)
+	local filled: { [string]: boolean } = {}
+	for _, f in file do
+		if type(f.step.fills) == "string" then
+			filled[f.step.fills :: string] = true
+		end
+	end
+	local out: { Flat } = {}
+	for i, f in file do
+		table.insert(out, f)
+		local q = file[i - 1]
+		if q and missed(state, q.step) and not filled[tostring(q.step.title)] then
+			table.insert(out, {
+				chapter = f.chapter,
+				ci = f.ci,
+				si = f.si,
+				regen = tostring(q.step.title),
+				step = { title = "Regenerating…", blocks = {} },
+			})
+		end
+	end
+	state.count = #file
+	state.steps = out
+end
+
+-- The furthest step the reader may be on: no step after an unanswered question.
+local function gate(state: State): number
+	for i, f in state.steps do
+		if choices_of(f.step) and pick_of(state, f.step) == nil then
+			return i
+		end
+	end
+	return #state.steps
 end
 
 local function resolve_checkout(state: State)
@@ -321,7 +412,7 @@ local function go_to(state: State, at: number)
 	if n == 0 then
 		return
 	end
-	state.at = math.clamp(at, 1, n)
+	state.at = math.clamp(at, 1, math.max(1, gate(state)))
 	-- Shared with the window half and later opens of the same file: resume here.
 	if tern.kv.get("at:" .. state.path) ~= state.at then
 		tern.kv.set("at:" .. state.path, state.at)
@@ -365,8 +456,10 @@ local function load(state: State): boolean
 	end
 	state.problem = nil
 	local old = state.tour
+	local old_count = state.count
+	local waiting = if state.steps[state.at] then state.steps[state.at].regen else nil
 	state.tour = tour
-	state.steps = flatten(tour)
+	build(state)
 	if not old or old.base ~= tour.base or old.head ~= tour.head or old.repo ~= tour.repo then
 		state.git = {}
 		state.checkout = nil
@@ -391,7 +484,19 @@ local function load(state: State): boolean
 		end
 	end
 	local pending = state.pending_ask
-	if pending and #state.steps > #flatten(old or { chapters = {} }) then
+	local filling: number? = nil
+	if waiting then
+		for i, f in state.steps do
+			if f.step.fills == waiting then
+				filling = i
+				break
+			end
+		end
+	end
+	if filling then
+		-- The reader waited on the placeholder: the steps that replace it.
+		go_to(state, filling)
+	elseif pending and state.count > old_count then
 		go_to(state, pending + 1)
 	else
 		go_to(state, state.at)
@@ -408,6 +513,9 @@ local function poll(state: State)
 		if load(state) then
 			state.cx:render()
 			state.cx:save()
+		elseif state.steps[state.at] and state.steps[state.at].regen then
+			-- The window half flags an answer no agent received in kv; show it.
+			state.cx:render()
 		end
 		poll(state)
 	end)
@@ -773,8 +881,80 @@ local function block_node(state: State, b: any): Node
 	return problem_node("unknown block: " .. table.concat(keys, ", "))
 end
 
+-- The question step titled `title`.
+local function question_titled(state: State, title: string): Step?
+	for _, f in state.steps do
+		if f.step.question and f.step.title == title then
+			return f.step
+		end
+	end
+	return nil
+end
+
+local function choices_node(state: State, step: Step, c: any): Node
+	local pick = pick_of(state, step)
+	local rows: { Node } = {}
+	for pos, i in display_order(tostring(step.title), #c.options) do
+		local mark, tone = "  ", "dim"
+		if pick ~= nil and i == c.answer then
+			mark, tone = "✔ ", "success"
+		elseif pick == i then
+			mark, tone = "✘ ", "error"
+		end
+		table.insert(rows, ui.row({
+			ui.text({ ui.span(mark, tone), ui.span(tostring(pos), "accent num") }),
+			ui.md(option_text(c, i)),
+		}))
+	end
+	table.insert(rows, ui.text({
+		ui.span(if pick == -1 then "· " else "  ", "muted"),
+		ui.span("0", "accent num"),
+		ui.span("  I don't know", "muted"),
+	}))
+	local verdict: Span
+	if pick == nil then
+		verdict = ui.span(string.format("Pick 1–%d (0 if you don't know) to go on.", #c.options), "accent")
+	elseif pick == c.answer then
+		verdict = ui.span("✔ Right. → for why.", "success")
+	elseif pick == -1 then
+		verdict = ui.span("→ for the answer; the tour is adding steps for this gap after it.", "warning")
+	else
+		verdict = ui.span("✘ Not this one. → for why; the tour is adding steps for your answer after it.", "warning")
+	end
+	table.insert(rows, ui.text({ verdict }))
+	return ui.col(rows)
+end
+
+-- Whether the window half found no agent to send the miss on `title` to.
+local function unsent(state: State, title: string): boolean
+	local flags = tern.kv.get("unsent:" .. state.path)
+	return type(flags) == "table" and flags[title] == true
+end
+
+local function regen_view(state: State, flat: Flat): Node
+	local title = flat.regen :: string
+	local kids: { Node } = {
+		ui.text({
+			ui.span(flat.chapter, "muted"),
+			ui.span(string.format("   %d / %d", state.at, #state.steps), "dim num"),
+		}),
+		ui.row({ ui.badge("Regenerating", "warning"), ui.text({ ui.span("Filling the gap in “" .. title .. "”", "strong") }) }),
+	}
+	if unsent(state, title) then
+		table.insert(kids, problem_node("No agent got your answer: set the tour's `agent`, or start one in its repo, then ⏎ to send it again."))
+	else
+		table.insert(kids, ui.text({ ui.span("The agent is writing steps around your answer; they replace this one.", "accent") }))
+		table.insert(kids, ui.progress(nil, ""))
+	end
+	table.insert(kids, ui.text({ ui.span("→ goes on without them.", "muted") }))
+	return ui.col(kids)
+end
+
 local function step_view(state: State): Node
 	local flat = state.steps[state.at]
+	if flat.regen then
+		return regen_view(state, flat)
+	end
 	local step = flat.step
 	local kids: { Node } = {
 		ui.text({
@@ -791,11 +971,24 @@ local function step_view(state: State): Node
 	if type(step.asked) == "string" then
 		table.insert(kids, ui.md("> **You asked:** " .. step.asked))
 	end
+	local prev = state.steps[state.at - 1]
+	if type(step.fills) == "string" and not (prev and prev.step.fills == step.fills) then
+		local q = question_titled(state, step.fills :: string)
+		local c = if q then choices_of(q) else nil
+		local pick = if q then pick_of(state, q) else nil
+		local said = if not c or pick == nil then ""
+			elseif pick == -1 then " you didn't know."
+			else " you picked “" .. option_text(c, pick) .. "”."
+		table.insert(kids, ui.md("> **Filling the gap** in “" .. step.fills .. "”:" .. said))
+	end
 	for _, b in step.blocks or {} do
 		local ok, node = pcall(block_node, state, b)
 		table.insert(kids, if ok then node else problem_node(first_line(tostring(node))))
 	end
-	if step.question then
+	local c = choices_of(step)
+	if c then
+		table.insert(kids, choices_node(state, step, c))
+	elseif step.question then
 		table.insert(kids, ui.text({ ui.span("Think of your answer, then → for it.", "muted") }))
 	end
 	return ui.col(kids)
@@ -817,7 +1010,7 @@ local function toc_view(state: State): Node
 		table.insert(label, ui.span(tostring(f.step.title or ""), if i == state.at then "strong" else nil))
 		table.insert(items, {
 			label = label,
-			icon = if f.step.question then "help" elseif i == state.at then "chevron-right" else nil,
+			icon = if f.regen then "refresh-cw" elseif f.step.question then "help" elseif i == state.at then "chevron-right" else nil,
 			value = ui.span(tostring(i), "dim num"),
 		})
 	end
@@ -843,8 +1036,13 @@ local function dock_view(state: State): Node
 	if state.pending_ask then
 		table.insert(lines, ui.text({ ui.span("Asked the agent: the answer lands as the next step.", "accent") }))
 	end
+	local flat = state.steps[state.at]
+	local c = if flat then choices_of(flat.step) else nil
 	local legend = if state.toc
 		then "↑↓ step  ⏎ go  t/esc back"
+		elseif c and pick_of(state, flat.step) == nil then string.format("1–%d answer  0 don't know  ← back  t contents  ? ask", #c.options)
+		elseif flat and flat.regen and unsent(state, flat.regen :: string) then "← → step  ⏎ send the answer again  t contents"
+		elseif flat and flat.regen then "← → step  t contents"
 		else "← → step  [ ] chapter  t contents  o open code  f follow " .. (if state.follow then "on" else "off") .. "  ? ask"
 	table.insert(lines, ui.text({ ui.span(legend, "dim") }))
 	return ui.col({ ui.lines(lines) })
@@ -880,8 +1078,42 @@ local function chapter_jump(state: State, dir: number)
 end
 
 local function ask(state: State)
+	local n = state.steps[state.at].n
+	if not n then
+		return
+	end
 	state.pending_ask = state.at
-	state.cx:open(LINK .. "ask?path=" .. url_encode(state.path) .. "&at=" .. state.at)
+	state.cx:open(LINK .. "ask?path=" .. url_encode(state.path) .. "&at=" .. n)
+end
+
+-- Sends a missed question's pick to the agent, which fills the gap (pr-tour skill).
+local function send_miss(state: State, flat: Flat)
+	local pick = pick_of(state, flat.step)
+	if flat.n and pick ~= nil then
+		state.cx:open(LINK .. "answer?path=" .. url_encode(state.path) .. "&at=" .. flat.n .. "&pick=" .. pick)
+	end
+end
+
+-- `key`: 1–n picks the option shown at that position, 0 is "I don't know". Answers are final.
+local function answer(state: State, key: number): boolean
+	local flat = state.steps[state.at]
+	local c = choices_of(flat.step)
+	if not c or pick_of(state, flat.step) ~= nil then
+		return false
+	end
+	local title = tostring(flat.step.title)
+	local order = display_order(title, #c.options)
+	if key > #order then
+		return false
+	end
+	state.answers[title] = if key == 0 then -1 else order[key]
+	tern.kv.set("answers:" .. state.path, state.answers)
+	build(state)
+	prefetch(state)
+	if missed(state, flat.step) then
+		send_miss(state, flat)
+	end
+	return true
 end
 
 tern.block.define("tour", {
@@ -898,7 +1130,9 @@ tern.block.define("tour", {
 			raw = nil,
 			tour = nil,
 			steps = {},
+			count = 0,
 			at = tonumber(s.at) or tonumber(tern.kv.get("at:" .. path)) or 1,
+			answers = {},
 			problem = nil,
 			repo = nil,
 			checkout = nil,
@@ -910,6 +1144,10 @@ tern.block.define("tour", {
 			poll = nil,
 		}
 		running[cx.pane] = state
+		local answers = tern.kv.get("answers:" .. path)
+		if type(answers) == "table" then
+			state.answers = answers
+		end
 		tern.kv.set("pane:" .. cx.pane, path)
 		if path == "" then
 			state.problem = "No tour file: open a *.tour.json file (tern open FILE)"
@@ -960,7 +1198,19 @@ tern.block.define("tour", {
 			end
 			return true
 		end
-		if key.name == "right" or k == "l" or k == "n" or key.name == "space" then
+		local flat = state.steps[state.at]
+		if flat and string.match(k, "^%d$") then
+			return answer(state, tonumber(k) :: number)
+		elseif flat and flat.regen and (k == "o" or key.name == "enter") then
+			if unsent(state, flat.regen :: string) then
+				for _, f in state.steps do
+					if f.step.question and f.step.title == flat.regen then
+						send_miss(state, f)
+						break
+					end
+				end
+			end
+		elseif key.name == "right" or k == "l" or k == "n" or key.name == "space" then
 			go_to(state, state.at + 1)
 		elseif key.name == "left" or k == "h" or k == "p" or key.name == "backspace" then
 			go_to(state, state.at - 1)

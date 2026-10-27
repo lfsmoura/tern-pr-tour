@@ -1,6 +1,6 @@
 --!strict
 -- The window half: opens `*.tour.json` files as tour blocks (so an agent runs
--- `tern open --split right FILE`), and serves the `tern-difftour://` links the
+-- `tern open --tab FILE`), and serves the `tern-difftour://` links the
 -- block uses for what a host block cannot do itself: open code in the preview
 -- beside it, and ask the agent that wrote the tour a question.
 
@@ -73,7 +73,7 @@ local function open_tour(cx: WindowCx, path: string)
 	local pane = shown(cx, path)
 	if pane then
 		cx.layout:focus(pane)
-	elseif cx:new_block(KIND, { path }, "beside") then
+	elseif cx:new_block(KIND, { path }, "tab") then
 		remember(path)
 	else
 		cx:toast("error", "Diff Tour is not loaded on this host", "Install the plugin where the tour file lives.")
@@ -127,20 +127,31 @@ local function agent_pane(cx: WindowCx, tour: any): number?
 	return nil
 end
 
-local function send(cx: WindowCx, path: string, tour: any, at: number, step: any, question: string)
+-- The tour's step `at` (counting across chapters from 1).
+local function step_at(tour: any, at: number): any
+	local n = 0
+	for _, ch in tour.chapters or {} do
+		for _, s in ch.steps or {} do
+			n += 1
+			if n == at then
+				return s
+			end
+		end
+	end
+	return nil
+end
+
+local function one_line(s: any): string
+	return (string.gsub(tostring(s or ""), "%s+", " "))
+end
+
+-- Types `text` (one line) into the tour's agent; false when there is none.
+local function send(cx: WindowCx, tour: any, text: string, done: string): boolean
 	local pane = agent_pane(cx, tour)
 	if not pane then
 		cx:toast("error", "No agent to ask", "Set `agent` in the tour to the pane of the omp that wrote it ($TERN_PANE).")
-		return
+		return false
 	end
-	-- One line: it is typed into the agent's prompt.
-	local text = string.format(
-		'[diff-tour ask] %s — tour %s, step %d ("%s"). Answer per the pr-tour skill: insert 1–2 steps right after that step with "asked" set, then check the tour.',
-		(string.gsub(question, "%s+", " ")),
-		path,
-		at,
-		(string.gsub(tostring(step.title or ""), "%s+", " "))
-	)
 	local info = cx.session:pane(pane)
 	local asked = info ~= nil and info.kind == "agent" and pcall(function()
 		cx.agents:ask(pane, text)
@@ -148,7 +159,8 @@ local function send(cx: WindowCx, path: string, tour: any, at: number, step: any
 	if not asked then
 		cx:run(pane, text .. "\r")
 	end
-	cx:toast("info", "Asked the agent", "Its answer appears as the next step of the tour.")
+	cx:toast("info", "Sent to the agent", done)
+	return true
 end
 
 local function ask(cx: WindowCx, path: string, at: number)
@@ -157,24 +169,29 @@ local function ask(cx: WindowCx, path: string, at: number)
 		cx:toast("error", "Cannot read the tour", path)
 		return
 	end
-	local n = 0
-	local step: any = nil
-	for _, ch in tour.chapters or {} do
-		for _, s in ch.steps or {} do
-			n += 1
-			if n == at then
-				step = s
-			end
-		end
-	end
+	local step = step_at(tour, at)
 	if not step then
 		return
+	end
+	local function question(cx2: WindowCx, q: string)
+		send(
+			cx2,
+			tour,
+			string.format(
+				'[diff-tour ask] %s — tour %s, step %d ("%s"). Answer per the pr-tour skill: insert 1–2 steps right after that step with "asked" set, then check the tour.',
+				one_line(q),
+				path,
+				at,
+				one_line(step.title)
+			),
+			"Its answer appears as the next step of the tour."
+		)
 	end
 	local function own(cx2: WindowCx)
 		cx2:prompt({ placeholder = "Ask about this step", icon = "help", action = "ask" })
 			:next(function(text: string?, _err: string?, cx3: WindowCx?)
 				if text and cx3 and string.match(text, "%S") then
-					send(cx3, path, tour, at, step, text)
+					question(cx3, text)
 				end
 			end)
 	end
@@ -194,9 +211,60 @@ local function ask(cx: WindowCx, path: string, at: number)
 			elseif item.own then
 				own(cx2)
 			else
-				send(cx2, path, tour, at, step, item.label)
+				question(cx2, item.label)
 			end
 		end)
+end
+
+-- A missed question (`pick`: the option's 0-based index, -1 for "I don't know"): the agent
+-- writes steps that fill the gap. A send no agent got is flagged under `unsent:<path>`
+-- for the block's placeholder, which offers to send it again.
+local function answer(cx: WindowCx, path: string, at: number, pick: number)
+	local tour = read_tour(path)
+	local step = if tour then step_at(tour, at) else nil
+	local c = if step then step.choices else nil
+	if type(c) ~= "table" or type(c.options) ~= "table" then
+		cx:toast("error", "Cannot read the question", path)
+		return
+	end
+	local function option(i: number): (string, string?)
+		local o = c.options[i + 1]
+		if type(o) == "table" then
+			return one_line(o.text), if o.model then one_line(o.model) else nil
+		end
+		return one_line(o), nil
+	end
+	local said: string
+	if pick < 0 then
+		said = 'answered "I don\'t know"'
+	else
+		local text, model = option(pick)
+		said = string.format('picked "%s"', text) .. (if model then string.format(" (wrong model: %s)", model) else "")
+	end
+	local title = one_line(step.title)
+	local sent = send(
+		cx,
+		tour,
+		string.format(
+			'[diff-tour gap] On question step %d ("%s") of tour %s the reader %s; the answer is "%s". Fill the gap per the pr-tour skill: insert steps with "fills": "%s" right after step %d, then check the tour.',
+			at,
+			title,
+			path,
+			said,
+			(option(tonumber(c.answer) or 0)),
+			tostring(step.title),
+			at + 1
+		),
+		"It is adding steps to the tour for this gap."
+	)
+	local stored = tern.kv.get("unsent:" .. path)
+	local flags: { [string]: any } = if type(stored) == "table" then stored else {}
+	local key = tostring(step.title)
+	-- Flag a failed send, clear the flag once one goes through.
+	if (flags[key] == true) == sent then
+		flags[key] = if sent then nil else true
+		tern.kv.set("unsent:" .. path, flags)
+	end
 end
 
 -- A preview opens beside the focused pane, so a follow open while the tour's tab is
@@ -236,6 +304,8 @@ tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
 		end
 	elseif verb == "ask" and q.path then
 		ask(cx, q.path, tonumber(q.at) or 1)
+	elseif verb == "answer" and q.path and q.at and q.pick then
+		answer(cx, q.path, tonumber(q.at) or 1, tonumber(q.pick) or -1)
 	end
 	return { handled = true }
 end)
